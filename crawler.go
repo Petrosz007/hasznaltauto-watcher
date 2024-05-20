@@ -1,21 +1,20 @@
-package crawler
+package main
 
 import (
 	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/Petrosz007/hasznaltauto-watcher/internal/model"
 	colly "github.com/gocolly/colly/v2"
 )
 
-func CrawlSearchUrl(searchUrl string) []model.Listing {
+func CrawlSearchUrl(searchUrl string) []Listing {
 	c := colly.NewCollector(
 		colly.AllowedDomains("www.hasznaltauto.hu"),
 		colly.Async(true),
 	)
 
-	listings := make([]model.Listing, 0, 10)
+	listings := make([]Listing, 0, 10)
 
 	c.OnHTML(`ul.pagination li:not(.first, .next, .prev) a[href]`, func(e *colly.HTMLElement) {
 		c.Visit(e.Attr("href"))
@@ -31,7 +30,7 @@ func CrawlSearchUrl(searchUrl string) []model.Listing {
 		}
 		url := e.ChildAttr(`h3 > a`, "href")
 
-		listing := model.Listing{
+		listing := Listing{
 			ListingId:    listingIdRegex.FindStringSubmatch(url)[1],
 			Title:        e.ChildText(`h3 > a`),
 			Url:          url,

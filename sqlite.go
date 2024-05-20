@@ -1,10 +1,9 @@
-package db
+package main
 
 import (
 	"database/sql"
 	"log"
 
-	"github.com/Petrosz007/hasznaltauto-watcher/internal/model"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -17,25 +16,18 @@ func Migrate(dbPath string) error {
 
 	sqlStmt := `
   CREATE TABLE IF NOT EXISTS scans (
-    time INTEGER NOT NULL PRIMARY KEY -- unix timestamp
+    time INTEGER NOT NULL, -- unix timestamp
+    url  TEXT NOT NULL,
+    UNIQUE(time, url)
   );
 	CREATE TABLE IF NOT EXISTS listings (
-	  id             TEXT NOT NULL PRIMARY KEY,
-	  -- title          TEXT,
-	  -- price          TEXT,
-	  -- thumbnail_url  TEXT,
-	  url            TEXT NOT NULL,
-	  -- fuel_type      TEXT,
-	  -- year           TEXT,
-	  -- cubic_capacity TEXT,
-	  -- power_kw       TEXT,
-	  -- power_hp       TEXT,
-	  -- milage         TEXT,
-	  -- is_highlighted bool,
-    first_seen     INTEGER NOT NULL,
-    last_seen      INTEGER NOT NULL,
-	  FOREIGN KEY(first_seen) REFERENCES scans(time),
-	  FOREIGN KEY(last_seen) REFERENCES scans(time)
+	  id           TEXT NOT NULL PRIMARY KEY,
+	  url          TEXT NOT NULL,
+    first_seen   INTEGER NOT NULL,
+    last_seen    INTEGER NOT NULL,
+    scan_url     TEXT NOT NULL,
+	  FOREIGN KEY(first_seen, scan_url) REFERENCES scans(time, url),
+	  FOREIGN KEY(last_seen, scan_url) REFERENCES scans(time, url)
 	);
 	`
 
@@ -48,14 +40,14 @@ func Migrate(dbPath string) error {
 	return nil
 }
 
-func writeNewScanTime(db *sql.DB, scanTime int64) error {
-	stmt, err := db.Prepare("INSERT INTO scans(time) values(?)")
+func writeNewScanTime(db *sql.DB, scanTime int64, scanUrl string) error {
+	stmt, err := db.Prepare("INSERT INTO scans(time, url) values(?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec(scanTime)
+	_, err = stmt.Exec(scanTime, scanUrl)
 	if err != nil {
 		return err
 	}
@@ -63,21 +55,21 @@ func writeNewScanTime(db *sql.DB, scanTime int64) error {
 	return nil
 }
 
-func writeListings(db *sql.DB, scanTime int64, listings []model.Listing) error {
+func writeListings(db *sql.DB, scanTime int64, scanUrl string, listings []Listing) error {
 	log.Printf("Writing %d listings into DB\n", len(listings))
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 
-	stmt, err := tx.Prepare("INSERT OR IGNORE INTO listings(id, url, first_seen, last_seen) values(?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO listings(id, url, first_seen, last_seen, scan_url) values(?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, listing := range listings {
-		_, err := stmt.Exec(listing.ListingId, listing.Url, scanTime, scanTime)
+		_, err := stmt.Exec(listing.ListingId, listing.Url, scanTime, scanTime, scanUrl)
 		if err != nil {
 			return err
 		}
@@ -91,7 +83,7 @@ func writeListings(db *sql.DB, scanTime int64, listings []model.Listing) error {
 	return nil
 }
 
-func updateLastSeen(db *sql.DB, scanTime int64, listings []model.Listing) error {
+func updateLastSeen(db *sql.DB, scanTime int64, listings []Listing) error {
 	log.Printf("Updating %d listings in the DB\n", len(listings))
 	tx, err := db.Begin()
 	if err != nil {
@@ -122,19 +114,19 @@ func updateLastSeen(db *sql.DB, scanTime int64, listings []model.Listing) error 
 	return nil
 }
 
-func WriteScanToDb(dbPath string, scanTime int64, listings []model.Listing) error {
+func WriteScanToDb(dbPath string, scanTime int64, scanUrl string, listings []Listing) error {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	err = writeNewScanTime(db, scanTime)
+	err = writeNewScanTime(db, scanTime, scanUrl)
 	if err != nil {
 		return err
 	}
 
-	err = writeListings(db, scanTime, listings)
+	err = writeListings(db, scanTime, scanUrl, listings)
 	if err != nil {
 		return err
 	}
@@ -162,7 +154,7 @@ func readUrls(rows *sql.Rows) ([]string, error) {
 	return urls, nil
 }
 
-func GetFirstSeenListingURLs(dbPath string, scanTime int64) ([]string, error) {
+func GetFirstSeenListingURLs(dbPath string, scanTime int64, scanUrl string) ([]string, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
@@ -171,12 +163,13 @@ func GetFirstSeenListingURLs(dbPath string, scanTime int64) ([]string, error) {
 
 	stmt, err := db.Prepare(`
   SELECT url FROM listings
-  WHERE first_seen = ?
+  WHERE first_seen = ? AND scan_url = ?
+  AND (SELECT COUNT(*) FROM scans WHERE url = ?) > 1
   `)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := stmt.Query(scanTime)
+	rows, err := stmt.Query(scanTime, scanUrl, scanUrl)
 	if err != nil {
 		return nil, err
 	}

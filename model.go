@@ -1,4 +1,4 @@
-package model
+package main
 
 type Listing struct {
 	ListingId     string

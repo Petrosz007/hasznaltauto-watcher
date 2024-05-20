@@ -1,2 +1,3 @@
 /colly-cache/
-/db.sql
+/db.sqlite
+config.toml

@@ -2,50 +2,117 @@ package main
 
 import (
 	"log"
+	"sync"
 	"time"
 
-	"github.com/Petrosz007/hasznaltauto-watcher/internal/crawler"
-	"github.com/Petrosz007/hasznaltauto-watcher/internal/db"
+	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/viper"
 )
 
-func main() {
-	dbPath := "db.sql"
-	err := db.Migrate(dbPath)
-	if err != nil {
+type Config struct {
+	TelegramBotToken string
+	TelegramChatId   int64
+	SearchUrls       []string
+}
+
+func InitConfig() {
+	viper.SetDefault("db_path", "db.sqlite")
+	viper.SetDefault("scan_interval_minutes", 10)
+
+	viper.SetConfigName("config")
+	viper.SetConfigType("toml")
+	viper.AddConfigPath("/config")
+	viper.AddConfigPath(".")
+
+	if err := viper.ReadInConfig(); err != nil {
 		log.Fatal(err)
 	}
 
-	testSearchQueryUrl := "https://www.hasznaltauto.hu/talalatilista/PCOG2VG3R3RDADH5S56ADFGLZSCMOXNBIVNKDEKWTLL4UUCTIKJRQJLJGWAPR53V3LBDIFKPWWHOH6HY7CSCAZY76LTOKNETUKBIAJJZAVNWZREKWGURJ7UKA32QL2SAFU2JOATUPJYNXY2H4UFAZ2A3FDAF7RLKE4T72JINYMNFY3UURWLUZJAQ4MGHYDZTBMU3A5TZKK3X3FMIMXH75XGVQIHPSCM4VHNXXJEYW3PTOKKKOBQPOCVU6IXQ4ZDRKLIGIX7EXDTQ4HPKEMDHVEP6SCBPTEKXAFB4QH3NY2ZNAGSOAFHA7HAHHXYAILGUU2QB5GZ6WHA4AQ7QGEWE7Y6Q245PQSDAYZCCNE4WZL5XQCN7XQ57YKGHAL6SDA772A2WVDZ6KHXPG6DRMS7VJAJ5TWGDX33LD7EPYVJ6PQ5DEFAU3FG5DJMXNXK5OZW3NMYXS2FB7TNHKNOKSZV2KA52V2BMSGLQCXSKU6GQT264OKAKJACWVXLHTDIHIOOJIRLRHVFZ6YT5II7DMDBZXAEQFL2QIB2KKWVODTPI7YIO76OAKYHKCMTDG4TKTREOJSYOMZYA6YBOL4262ANM4FGEBLSEFXSU4725ME2KJ25TRC3R23C3GGGPXJ4B5Y3ZC4X4J2WOAGVXCRC3UKVV2GATJNZ6SQ7BDPMFOVHF5RPAGP2D2YND2JRIB7ASU2RUK6VCE2J6OVVQLDSP3NAIBYJC7EYHS75N3D3NKEC7Y365EQL5E5NWOFBVKYQXVRHHWDJZAFGFD25GMF23GWBAHGTT5SO5ZVR6YVUNC22F63JAY45MAT5PHCDIIOLI5ZFIDTRG7XNPQXP6EEHFG5IGSZMSKHR37AN3UG62BTYP4RFNAZWA6PPITTC675G7XWVADWIL37YH4H62H2Q"
+	for _, key := range []string{"telegram.bot_token", "telegram.chat_id", "search_urls"} {
+		if !viper.IsSet(key) {
+			log.Fatal("The following key is not set in the config: ", key)
+		}
+	}
+
+	viper.OnConfigChange(func(e fsnotify.Event) {
+		log.Println("Config file changed:", e.Name, "(Note: only `search_urls` are reloaded)")
+	})
+	viper.WatchConfig()
+}
+
+func Scan(dbPath string, telegramNotifier *TelegramNotifier) {
+	searchUrls := viper.GetStringSlice("search_urls") // Read the search_urls from viper, so hot reloading configs is allowed
+	if len(searchUrls) == 0 {
+		log.Fatal("No search_urls provided or the list is empty. Please provide search urls.")
+	}
 
 	scanTime := time.Now().Unix()
-	listings := crawler.CrawlSearchUrl(testSearchQueryUrl)
+	ch := make(chan []string)
+	var wg sync.WaitGroup
+	for _, searchUrl := range searchUrls {
+		wg.Add(1)
+		go (func() {
+			defer wg.Done()
 
-	err = db.WriteScanToDb(dbPath, scanTime, listings)
-	if err != nil {
-		log.Fatal(err)
+			listings := CrawlSearchUrl(searchUrl)
+
+			err := WriteScanToDb(dbPath, scanTime, searchUrl, listings)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			urls, err := GetFirstSeenListingURLs(dbPath, scanTime, searchUrl)
+			if err != nil {
+				log.Fatal(err)
+			}
+			ch <- urls
+		})()
 	}
 
-	urls, err := db.GetFirstSeenListingURLs(dbPath, scanTime)
-	if err != nil {
-		log.Fatal(err)
+	go (func() {
+		wg.Wait()
+		close(ch)
+	})()
+
+	totalUrls := make([]string, 0, 10)
+	for url := range ch {
+		totalUrls = append(totalUrls, url...)
 	}
 
-	if len(urls) > 0 {
-		log.Println("New listings:")
-		for _, url := range urls {
+	if len(totalUrls) > 0 {
+		log.Println(len(totalUrls), " new listings:")
+		for _, url := range totalUrls {
 			log.Println(url)
 		}
 	} else {
 		log.Println("No new listings")
 	}
 
-	// enc := json.NewEncoder(os.Stdout)
-	// enc.SetIndent("", "  ")
-	// enc.Encode(listings)
-	// jsonEncodedListings, err := json.Marshal(listings)
-	// if err != nil {
-	// 	fmt.Println("Error: ", err.Error())
-	// 	return
-	// }
-	// fmt.Printf("%v", string(jsonEncodedListings))
+	telegramNotifier.Notify(totalUrls)
+}
+
+func main() {
+	InitConfig()
+
+	dbPath := viper.GetString("db_path")
+	telegramBotToken := viper.GetString("telegram.bot_token")
+	telegramChatId := viper.GetInt64("telegram.chat_id")
+	sleep_duration := viper.GetDuration("scan_interval_minutes") * time.Minute
+
+	err := Migrate(dbPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	telegramNotifier, err := NewTelegramNotifier(telegramBotToken, telegramChatId)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		Scan(dbPath, telegramNotifier)
+
+		log.Println("Sleeping", sleep_duration)
+		time.Sleep(sleep_duration)
+	}
 }
